@@ -73,7 +73,25 @@ swaps the board for the link graph.
 The `+` in a column header creates a task file with that status and opens
 it in your editor. The optional fields come as YAML comments, uncomment the
 ones you fill. Dragging a card to another column rewrites its `status:`
-line. Filters and sort are stored in the URL, so a bookmark keeps them.
+line. The task dialog edits the status, the custom fields, `assign`,
+`due`, `scope` and `type`, and ticks the checkboxes of the body. Each
+change rewrites one line of the file. The rest of the body stays in your
+editor, behind "Open in editor".
+
+The board reloads when a task file changes, whether you edit it, an agent
+edits it or a `git pull` brings it. Filters, sort and the open task are
+stored in the URL, so a bookmark or a shared link keeps them.
+
+## AI agents
+
+An agent can manage tasks by editing the files, without the board.
+[`AGENTS.md`](AGENTS.md) tells it the file format, the parser limits and
+how to move a task. Copy it to your project root, or append it to your own
+`AGENTS.md` or `CLAUDE.md`. It ships in the package:
+
+```bash
+cat node_modules/kandepo/AGENTS.md >> AGENTS.md
+```
 
 ## Configuration
 
@@ -180,11 +198,20 @@ lists. It resolves the `[[wikilinks]]`, then injects the tasks as JSON,
 `src/board.css` and `src/board.js` into `src/board.html`. The output is one
 HTML file with no external asset.
 
-The server listens on `127.0.0.1` and takes three JSON writes from the
-board: `POST /new` creates a task, `POST /status` rewrites a status,
-`POST /open` opens a file in your editor. It refuses requests from another
-origin and paths outside the task folders. It watches the folders and
-rebuilds the HTML on every change, reload the tab to see it.
+The server listens on `127.0.0.1` and takes four JSON writes from the
+board: `POST /new` creates a task, `POST /field` sets one frontmatter key,
+`POST /check` ticks or unticks a checkbox, `POST /open` opens a file in
+your editor. It refuses requests from another
+origin and paths outside the task folders. `/field` accepts the editable
+keys only and rejects values the parser would misread, such as a newline
+or a comma inside a list item. The server watches the folders and rebuilds
+the HTML on every change. When the HTML changes, it sends an event on
+`GET /events` and open boards reload. A board waits while you type in a
+field.
+
+The board uses Atkinson Hyperlegible Next, inlined as a Latin subset
+(54 KB). The font is under the SIL Open Font License, see
+`src/fonts/OFL.txt`.
 
 ## Development
 

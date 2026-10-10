@@ -4,8 +4,9 @@
  * kandepo: a kanban generated from the markdown tasks of a repo.
  * Usage: kandepo [tasks-dir] [output-file] [--no-serve] [--watch] [--sync[=name]] [--dry-run] [--help]
  * While it runs, the server serves the board on http://localhost:<port>, watches the
- * task folders and rebuilds the HTML. POST /new creates a task, POST /status changes
- * its column, POST /open opens the file in the editor. --sync runs the connectors of the config.
+ * task folders and rebuilds the HTML. GET /events tells open boards to reload, POST /new creates
+ * a task, POST /field sets one frontmatter key, POST /check ticks a checkbox, POST /open opens the file in the editor.
+ * --sync runs the connectors of the config.
  * Config: kandepo.config.json in the current folder, every key optional, see DEFAULTS.
  * CLI arguments win over the config file.
  */
@@ -100,7 +101,8 @@ function readTasks(dirs) {
     if (!fs.existsSync(dir)) continue;
     const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
     files.forEach(filename => {
-      const content = fs.readFileSync(path.join(dir, filename), 'utf-8');
+      const file = path.join(dir, filename);
+      const content = fs.readFileSync(file, 'utf-8');
       const { data, body } = parseFrontmatter(content);
       tasks.push({
         filename,
@@ -108,7 +110,9 @@ function readTasks(dirs) {
         body,
         status: (data.status && data.status !== '""') ? data.status : 'not_started',
         _dir: path.basename(dir),
-        _path: path.resolve(path.join(dir, filename)),
+        _path: path.resolve(file),
+        // Last save of the file. A git clone or checkout resets it.
+        _mtime: Math.round(fs.statSync(file).mtimeMs),
       });
     });
   }
@@ -200,13 +204,63 @@ ${fieldTemplate().replace(/^# /gm, '')}
 ---
 `;
 
-// Replaces or adds a scalar key in the frontmatter, the rest of the file stays as is.
+// Sets one key in the frontmatter, the rest of the file stays as is. The new line replaces the key
+// with its block list items, else its commented template line (`# key:`), else goes last.
+// A null value removes the key.
 function setField(content, key, value) {
+  const line = value == null ? [] : [`${key}: ${value}`];
   const match = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!match) return `---\n${key}: ${value}\n---\n${content}`;
-  const line = new RegExp(`^${key}:.*$`, 'm');
-  const yaml = line.test(match[1]) ? match[1].replace(line, `${key}: ${value}`) : `${match[1]}\n${key}: ${value}`;
-  return `---\n${yaml}\n---${content.slice(match[0].length)}`;
+  if (!match) return line.length ? `---\n${line[0]}\n---\n${content}` : content;
+  const lines = match[1].split('\n');
+  let at = lines.findIndex(l => l.startsWith(key + ':'));
+  let count = 1;
+  if (at === -1) at = lines.findIndex(l => l.startsWith(`# ${key}:`));
+  if (at === -1) { at = lines.length; count = 0; }
+  else while (/^\s+- /.test(lines[at + count] ?? '')) count++;
+  lines.splice(at, count, ...line);
+  return `---\n${lines.join('\n')}\n---${content.slice(match[0].length)}`;
+}
+
+// Ticks or unticks the n-th checkbox of the body. Code blocks are skipped, as the board skips them.
+// Returns null when there is no such checkbox.
+function setCheck(content, index, checked) {
+  const frontmatter = content.match(/^---\n[\s\S]*?\n---\n?/);
+  const start = frontmatter ? frontmatter[0].length : 0;
+  const lines = content.slice(start).split('\n');
+  let fence = false;
+  let n = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim().startsWith('```')) { fence = !fence; continue; }
+    if (fence || !/^\s*[-*]\s+\[[ xX]\]\s/.test(lines[i])) continue;
+    if (n++ !== index) continue;
+    lines[i] = lines[i].replace(/\[[ xX]\]/, checked ? '[x]' : '[ ]');
+    return content.slice(0, start) + lines.join('\n');
+  }
+  return null;
+}
+
+// A field edited from the board, checked and written as one frontmatter line. Throws on a value
+// the parser would misread. Returns null to remove the key.
+const LIST_FIELDS = ['scope', 'type'];
+function formatField(key, value, fields = CONFIG.fields) {
+  if (!['status', 'assign', 'due', ...LIST_FIELDS].includes(key) && !Object.hasOwn(fields, key)) throw new Error(`Not editable: ${key}`);
+  const clean = v => {
+    const text = String(v ?? '').trim();
+    if (/[\r\n]/.test(text)) throw new Error('One line only');
+    return text;
+  };
+  if (LIST_FIELDS.includes(key)) {
+    const items = [].concat(value ?? []).map(clean).filter(Boolean);
+    if (items.some(v => /[,[\]]/.test(v))) throw new Error(`No comma or bracket in ${key}`);
+    return items.length ? `[${items.join(', ')}]` : null;
+  }
+  const text = clean(value);
+  if (key === 'status' && !STATUSES.includes(text)) throw new Error(`Unknown status: ${text}`);
+  if (!text) return null;
+  if (key === 'due' && !/^\d{4}-\d{2}-\d{2}$/.test(text)) throw new Error('due is YYYY-MM-DD');
+  if (fields[key]?.length && !fields[key].includes(text)) throw new Error(`${key} is one of ${fields[key].join(', ')}`);
+  if (/^\[|^(~|null|"")$/.test(text)) throw new Error(`The parser would not read ${text} as text`);
+  return text;
 }
 
 // --- Generate HTML ---
@@ -218,6 +272,9 @@ function generateHTML(tasks, filters) {
   const cols = columns();
   const values = {
     title: escapeHtml(CONFIG.title),
+    // Inlined so the board stays one file. Latin subset of Atkinson Hyperlegible Next, OFL, see src/fonts/OFL.txt.
+    font: `@font-face { font-family: 'Atkinson Hyperlegible Next'; font-weight: 200 800; font-display: swap; src: url(data:font/woff2;base64,${
+      fs.readFileSync(path.join(__dirname, 'src/fonts/atkinson-hyperlegible-next.woff2')).toString('base64')}) format('woff2'); }`,
     styles: fs.readFileSync(path.join(__dirname, 'src/board.css'), 'utf-8').trimEnd(),
     script: fs.readFileSync(path.join(__dirname, 'src/board.js'), 'utf-8').trimEnd(),
     tasks: escapeJson(tasks),
@@ -264,11 +321,20 @@ function isAllowedPath(p, dirs = CONFIG.dirs) {
 const http = require('http');
 const { execFile } = require('child_process');
 
+// Open boards, as server-sent event streams. A rebuild that changes the HTML tells them to reload.
+const clients = new Set();
+let lastHtml = null;
+
+// A write from the board rebuilds at once, then the watcher fires on the same change: the second
+// build produces the same HTML and stops here.
 function build() {
   const tasks = resolveLinks(readTasks(CONFIG.dirs));
   const html = generateHTML(tasks, collectFilters(tasks));
+  if (html === lastHtml) return;
+  lastHtml = html;
   fs.writeFileSync(CONFIG.output, html, 'utf-8');
   console.log(`\u2713 ${tasks.length} tasks \u2192 ${CONFIG.output}`);
+  clients.forEach(res => res.write('data: reload\n\n'));
 }
 
 // Rebuilds the board when a .md changes. fs.watch can fire several times per save, hence the debounce.
@@ -306,9 +372,16 @@ function serve() {
       res.writeHead(code, body ? { 'Content-Type': 'application/json' } : {});
       res.end(body ? JSON.stringify(body) : undefined);
     };
-    if (req.method === 'GET' && req.url === '/') {
+    if (req.method === 'GET' && req.url.split('?')[0] === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(fs.readFileSync(CONFIG.output));
+    }
+    if (req.method === 'GET' && req.url === '/events') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      res.write(': connected\n\n');
+      clients.add(res);
+      req.on('close', () => clients.delete(res));
+      return;
     }
     if (req.method !== 'POST') return end(404);
     if (req.headers.origin && !origins.has(req.headers.origin)) return end(403);
@@ -335,10 +408,19 @@ function serve() {
       openInEditor(file);
       return end(201, { path: path.resolve(file) });
     }
-    if (req.url === '/status') {
+    if (req.url === '/check') {
       if (!isAllowedPath(body.path) || !fs.existsSync(body.path)) return end(403);
-      if (!STATUSES.includes(body.status)) return end(400, { error: `Unknown status: ${body.status}` });
-      fs.writeFileSync(body.path, setField(fs.readFileSync(body.path, 'utf-8'), 'status', body.status));
+      const content = setCheck(fs.readFileSync(body.path, 'utf-8'), Number(body.index), Boolean(body.checked));
+      if (content == null) return end(400, { error: 'No such checkbox' });
+      fs.writeFileSync(body.path, content);
+      build();
+      return end(200);
+    }
+    if (req.url === '/field') {
+      if (!isAllowedPath(body.path) || !fs.existsSync(body.path)) return end(403);
+      let value;
+      try { value = formatField(body.key, body.value); } catch (err) { return end(400, { error: err.message }); }
+      fs.writeFileSync(body.path, setField(fs.readFileSync(body.path, 'utf-8'), body.key, value));
       build();
       return end(200);
     }
@@ -394,4 +476,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { loadConfig, parseFrontmatter, readTasks, resolveLinks, collectFilters, isAllowedPath, setField, slugify, fieldTemplate, sync, DEFAULTS };
+module.exports = { loadConfig, parseFrontmatter, readTasks, resolveLinks, collectFilters, isAllowedPath, setField, setCheck, formatField, slugify, fieldTemplate, sync, DEFAULTS };

@@ -8,7 +8,7 @@ const { execFileSync, spawn } = require('child_process');
 const { once } = require('events');
 const { setTimeout: delay } = require('timers/promises');
 const vm = require('vm');
-const { loadConfig, parseFrontmatter, readTasks, resolveLinks, collectFilters, isAllowedPath, setField, slugify, fieldTemplate, sync, DEFAULTS } = require('./kanban.cjs');
+const { loadConfig, parseFrontmatter, readTasks, resolveLinks, collectFilters, isAllowedPath, setField, setCheck, formatField, slugify, fieldTemplate, sync, DEFAULTS } = require('./kanban.cjs');
 
 // frontmatter : scalaire, ~, liste inline, liste en bloc
 const { data, body } = parseFrontmatter(
@@ -31,6 +31,35 @@ assert.strictEqual(setField('---\ntitle: A\nstatus: done\n---\n\nbody\n', 'statu
 assert.strictEqual(setField('---\ntitle: A\n---\nbody', 'status', 'done'), '---\ntitle: A\nstatus: done\n---\nbody');
 assert.strictEqual(setField('body', 'status', 'done'), '---\nstatus: done\n---\nbody');
 assert.strictEqual(parseFrontmatter(setField('---\ntitle: A\nscope:\n  - x\n---\n', 'status', 'done')).data.status, 'done');
+// setField: null removes the key, a block list goes with its items, a commented template line is uncommented
+assert.strictEqual(setField('---\ntitle: A\nassign: Ana\n---\nbody', 'assign', null), '---\ntitle: A\n---\nbody');
+assert.strictEqual(setField('---\ntitle: A\nscope:\n  - x\n  - y\ndue: 2026-01-01\n---\n', 'scope', '[z]'), '---\ntitle: A\nscope: [z]\ndue: 2026-01-01\n---\n');
+assert.strictEqual(setField('---\ntitle: A\n# priority: high | low\n# assign: Ana\n---\n', 'priority', 'low'), '---\ntitle: A\npriority: low\n# assign: Ana\n---\n');
+assert.strictEqual(setField('body', 'assign', null), 'body');
+
+// setCheck: the n-th checkbox of the body, code blocks and the frontmatter skipped
+const checks = '---\ntitle: A\n---\n- [ ] a\n```\n- [ ] in code\n```\n* [X] b\n- [ ]\n';
+assert.strictEqual(setCheck(checks, 0, true), checks.replace('- [ ] a', '- [x] a'));
+assert.strictEqual(setCheck(checks, 1, false), checks.replace('* [X] b', '* [ ] b'));
+assert.strictEqual(setCheck(checks, 2, true), null);
+assert.strictEqual(setCheck('- [ ] no frontmatter', 0, true), '- [x] no frontmatter');
+
+// formatField: what the board may write, checked against the parser and the config
+const fields = { priority: ['high', 'low'], mood: [] };
+assert.strictEqual(formatField('status', 'done', fields), 'done');
+assert.throws(() => formatField('status', '', fields), /Unknown status/);
+assert.strictEqual(formatField('priority', 'low', fields), 'low');
+assert.throws(() => formatField('priority', 'urgent', fields), /one of high, low/);
+assert.strictEqual(formatField('mood', ' calm ', fields), 'calm');
+assert.strictEqual(formatField('assign', '', fields), null);
+assert.strictEqual(formatField('scope', ['api', ' ', 'pwa '], fields), '[api, pwa]');
+assert.strictEqual(formatField('type', [], fields), null);
+assert.throws(() => formatField('scope', ['a,b'], fields), /comma/);
+assert.throws(() => formatField('assign', 'Ana\nstatus: done', fields), /One line/);
+assert.throws(() => formatField('due', 'tomorrow', fields), /YYYY-MM-DD/);
+assert.throws(() => formatField('assign', 'null', fields), /parser/);
+assert.throws(() => formatField('title', 'X', fields), /Not editable/);
+assert.throws(() => formatField('__proto__', 'X', fields), /Not editable/);
 
 // config : défauts < kandepo.config.json < arguments CLI
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kandepo-'));
@@ -69,6 +98,7 @@ const tasks = readTasks([path.join(dir, 'tasks'), path.join(dir, 'absent')]);
 assert.strictEqual(tasks.length, 1);
 assert.strictEqual(tasks[0].status, 'not_started');
 assert.strictEqual(tasks[0]._dir, 'tasks');
+assert.ok(tasks[0]._mtime > 0);
 
 // wikilinks: resolved by file slug or by title, case-insensitive, unknown ones ignored
 const linked = resolveLinks([
@@ -113,10 +143,11 @@ assert.ok(html.includes('<option value="A &quot;&lt;&amp;&gt;&#39;">A &quot;&lt;
 assert.ok(html.includes(fs.readFileSync(path.join(__dirname, 'src/board.css'), 'utf-8').trimEnd()));
 assert.ok(html.includes(fs.readFileSync(path.join(__dirname, 'src/board.js'), 'utf-8').trimEnd()));
 assert.ok(!/<script\b[^>]*\bsrc=|<link\b[^>]*\brel=["']stylesheet/i.test(html));
-assert.strictEqual((html.match(/<script>/g) || []).length, 1);
-assert.strictEqual((html.match(/<\/script>/g) || []).length, 1);
+// The theme script in <head>, then the board's. Task data cannot close a script early.
+assert.strictEqual((html.match(/<script>/g) || []).length, 2);
+assert.strictEqual((html.match(/<\/script>/g) || []).length, 2);
 
-const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][1][1];
 new vm.Script(script);
 const documentStub = { querySelectorAll: () => [], getElementById: () => ({ options: [{ value: 'size' }] }) };
 const client = vm.runInNewContext(script.slice(0, script.indexOf('\nconst dialog ='))
@@ -127,17 +158,28 @@ assert.strictEqual(client.TASKS[0].body, markdown);
 assert.strictEqual(client.COLUMNS.map(c => c.label).join('|'), 'To do|In progress|Blocked|Done');
 assert.strictEqual(JSON.stringify(client.FIELDS), '{"size":["S","M","L"]}');
 assert.ok(html.includes('<select id="f-size" data-key="size"><option value="">All</option><option value="S">S</option>'));
-assert.ok(html.includes('<select id="f-sort"><option value="size">size</option><option value="">file</option></select>'));
+assert.ok(html.includes('<select id="f-sort"><option value="_mtime">recent</option><option value="size">size</option><option value="">file</option></select>'));
 assert.strictEqual(client.SERVER_URL, 'http://localhost:9000');
 assert.strictEqual(client.countTasks(markdown).done, 1);
 assert.ok(client.mdToHtml(markdown).includes('<pre><code>const file = `C:\\tmp\\${name}`;</code></pre>'));
+assert.ok(client.mdToHtml(markdown).includes('<input type="checkbox" id="chk-1" data-check="1" checked><label for="chk-1">b</label>'));
 
-// card: one folder so no folder tag, field shown with its name, checkboxes counted from two
+// card: one folder so no folder tag, field named in its tooltip, checkboxes counted from two
 const card = client.renderCard(client.TASKS[0], 0);
 assert.ok(!card.includes('class="tag dir"'));
-assert.ok(card.includes('<span class="tag field">size M</span>'));
+assert.ok(card.includes('<span class="tag field" title="size: M">M</span>'));
+// a leading ID moves to the top line, screen readers still read it with the title
+const withId = client.renderCard({ title: 'OPS-001 Write the image' }, 5);
+assert.ok(withId.includes('<span class="card-id">OPS-001</span>'));
+assert.ok(withId.includes('<span class="visually-hidden">OPS-001 </span>Write the image</div>'));
 assert.ok(card.includes('1/2'));
 assert.ok(!client.renderCard({ title: 't', body: '- [ ] a' }, 1).includes('0/1'));
+// scope and type deduplicated, a past due date red only on an open task
+const tags = client.renderCard({ title: 't', scope: ['ops'], type: ['OPS', 'bug'], due: '2000-01-01', status: 'in_progress' }, 2);
+assert.strictEqual((tags.match(/class="tag label"/g) || []).length, 2);
+assert.ok(tags.includes('class="due late"'));
+assert.ok(!client.renderCard({ title: 't', due: '2000-01-01', status: 'done' }, 3).includes('late'));
+assert.ok(!client.renderCard({ title: 't', due: '2999-01-01', status: 'in_progress' }, 4).includes('late'));
 
 // sort: position in the field's list, a missing or unknown value last
 assert.deepStrictEqual([{ size: 'L' }, {}, { size: 'S' }, { size: 'XL' }].sort((a, b) => client.rank(a, 'size') - client.rank(b, 'size')).map(t => t.size),
@@ -239,10 +281,28 @@ async function checkServer() {
     assert.strictEqual((await post('/new', { title: 'Sans statut' })).status, 201);
     assert.ok(fs.readFileSync(path.join(tasksDir, 'sans-statut.md'), 'utf8').includes('\nstatus: not_started\n'));
 
-    assert.strictEqual((await post('/status', { path: file, status: 'done' })).status, 200);
+    // An open board gets an event when a write changes the HTML.
+    const events = await fetch(base + '/events');
+    const reader = events.body.getReader();
+    await reader.read(); // the ": connected" comment
+    assert.strictEqual((await post('/field', { path: file, key: 'status', value: 'done' })).status, 200);
+    assert.ok(new TextDecoder().decode((await reader.read()).value).includes('data: reload'));
+    await reader.cancel();
     assert.ok(fs.readFileSync(file, 'utf8').includes('\nstatus: done\n'));
-    assert.strictEqual((await post('/status', { path: file, status: 'nope' })).status, 400);
-    assert.strictEqual((await post('/status', { path: path.join(serverDir, 'kandepo.config.json'), status: 'done' })).status, 403);
+    assert.strictEqual((await post('/field', { path: file, key: 'priority', value: 'high' })).status, 200);
+    assert.strictEqual((await post('/field', { path: file, key: 'scope', value: ['api', 'pwa'] })).status, 200);
+    assert.deepStrictEqual(parseFrontmatter(fs.readFileSync(file, 'utf8')).data,
+      { title: 'Nouvelle tâche : test', status: 'done', priority: 'high', scope: ['api', 'pwa'] });
+    assert.strictEqual((await post('/field', { path: file, key: 'status', value: 'nope' })).status, 400);
+    assert.strictEqual((await post('/field', { path: file, key: 'title', value: 'X' })).status, 400);
+    assert.strictEqual((await post('/field', { path: path.join(serverDir, 'kandepo.config.json'), key: 'status', value: 'done' })).status, 403);
+    assert.strictEqual((await fetch(base + '/?task=a')).status, 200);
+
+    fs.appendFileSync(file, '\n- [ ] one\n- [ ] two\n'); // index 0 is the checkbox of the template
+    assert.strictEqual((await post('/check', { path: file, index: 2, checked: true })).status, 200);
+    assert.ok(fs.readFileSync(file, 'utf8').endsWith('- [ ] one\n- [x] two\n'));
+    assert.strictEqual((await post('/check', { path: file, index: 9, checked: true })).status, 400);
+    assert.strictEqual((await post('/check', { path: '/etc/hosts', index: 0, checked: true })).status, 403);
 
     assert.strictEqual((await post('/open', { path: file })).status, 200);
     assert.strictEqual((await post('/open', { path: '/etc/passwd' })).status, 403);

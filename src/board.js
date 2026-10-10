@@ -15,23 +15,43 @@ function countTasks(body) {
 const ONE_DIR = new Set(TASKS.map(t => t._dir)).size < 2;
 let HIDE_DIR = ONE_DIR;
 
-function tagsHtml(task) {
-  const tag = (v, cls) => `<span class="tag${cls ? ' ' + cls : ''}">${esc(v)}</span>`;
-  const list = v => [].concat(v ?? []).map(x => tag(x)).join('');
+const TODAY = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local time
+
+// A title that starts with an ID like OPS-001 shows the ID on the card's top line.
+const TITLE_ID = /^([A-Z][A-Z0-9]*-\d+)\s+(.+)/;
+
+const tag = (v, cls, title) => `<span class="tag ${cls}"${title ? ` title="${esc(title)}"` : ''}>${esc(v)}</span>`;
+
+// Top line: what identifies and sizes the task on the left, due date and progress on the right.
+function headHtml(task, id) {
   const { total, done } = countTasks(task.body);
-  return (task._dir && !HIDE_DIR ? tag(task._dir, 'dir') : '')
-    + Object.keys(FIELDS).filter(name => task[name]).map(name => tag(`${name} ${task[name]}`, 'field')).join('')
-    + (task.assign ? tag(task.assign, 'assign') : '')
-    + list(task.scope) + list(task.type)
-    + (task.due ? tag('due ' + task.due, 'due') : '')
+  const late = task.due && task.status !== 'done' && String(task.due) < TODAY;
+  const aside = (task.due ? `<span class="due${late ? ' late' : ''}">due ${esc(task.due)}</span>` : '')
     + (total > 1 ? `<span class="checks">${done}/${total}</span>` : '');
+  return (id ? `<span class="card-id">${esc(id)}</span>` : '')
+    + Object.keys(FIELDS).filter(name => task[name]).map(name => tag(task[name], 'field', `${name}: ${task[name]}`)).join('')
+    + (task.assign ? tag(task.assign, 'assign') : '')
+    + (aside ? `<span class="card-aside">${aside}</span>` : '');
+}
+
+function labelsHtml(task) {
+  // scope and type share one list, a value in both shows once.
+  const seen = new Set();
+  const labels = [].concat(task.scope ?? [], task.type ?? []).filter(v => {
+    const k = String(v).toLowerCase();
+    return !seen.has(k) && seen.add(k);
+  });
+  return (task._dir && !HIDE_DIR ? tag(task._dir, 'dir') : '') + labels.map(v => tag(v, 'label')).join('');
 }
 
 function renderCard(task, index) {
+  const full = String(task.title || task.filename);
+  const [, id, title = full] = full.match(TITLE_ID) || [];
   return `
   <div class="card" data-i="${index}" role="button" tabindex="0" draggable="true" aria-labelledby="card-title-${index}">
-    <div class="card-title" id="card-title-${index}">${esc(task.title || task.filename)}</div>
-    <div class="card-meta">${tagsHtml(task)}</div>
+    <div class="card-head">${headHtml(task, id)}</div>
+    <div class="card-title" id="card-title-${index}">${id ? `<span class="visually-hidden">${esc(id)} </span>` : ''}${esc(title)}</div>
+    <div class="card-meta">${labelsHtml(task)}</div>
   </div>`;
 }
 
@@ -54,7 +74,8 @@ function render() {
   HIDE_DIR = ONE_DIR || Boolean(document.getElementById('f-_dir').value);
 
   const filtered = TASKS.filter(task => FILTERS.every(el => !el.value || matches(task[el.dataset.key], el.value)));
-  if (sortBy) filtered.sort((a, b) => rank(a, sortBy) - rank(b, sortBy));
+  if (sortBy === '_mtime') filtered.sort((a, b) => b._mtime - a._mtime);
+  else if (sortBy) filtered.sort((a, b) => rank(a, sortBy) - rank(b, sortBy));
 
   COLUMNS.forEach(col => {
     const inCol = filtered.filter(t => t.status === col.id);
@@ -150,6 +171,7 @@ function mdToHtml(src, links = {}) {
   const openList = () => { if (!inList) { out.push('<ul>'); inList = true; } };
 
   let fence = null;
+  let box = 0; // checkbox index in the body, as the server's setCheck counts them
   for (const line of src.split('\n')) {
     if (line.trim().startsWith('```')) {
       if (fence) { out.push(`<pre><code>${esc(fence.join('\n'))}</code></pre>`); fence = null; }
@@ -161,7 +183,11 @@ function mdToHtml(src, links = {}) {
     const check = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.*)/);
     const item = line.match(/^\s*[-*]\s+(.*)/);
     if (heading) { closeList(); out.push(`<h3>${inline(heading[2])}</h3>`); }
-    else if (check) { openList(); out.push(`<li class="check">${check[1] === ' ' ? '☐' : '☑'} ${inline(check[2])}</li>`); }
+    else if (check) {
+      openList();
+      const id = `chk-${box}`;
+      out.push(`<li class="check"><input type="checkbox" id="${id}" data-check="${box++}"${check[1] === ' ' ? '' : ' checked'}><label for="${id}">${inline(check[2])}</label></li>`);
+    }
     else if (item) { openList(); out.push(`<li>${inline(item[1])}</li>`); }
     else if (line.trim() === '') closeList();
     else { closeList(); out.push(`<p>${inline(line)}</p>`); }
@@ -186,11 +212,51 @@ function api(route, body) {
     .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `Error ${r.status}`); });
 }
 
+// Live reload: the server sends an event after each rebuild, including the ones that follow
+// the board's own writes. The reload waits while you type in a field, then puts the focus back.
+const SERVED = location.protocol.startsWith('http');
+let reloadPending = false;
+function reload() {
+  reloadPending = true;
+  if (document.activeElement?.matches('input:not([type=checkbox])')) return;
+  try { sessionStorage.setItem('kandepo:focus', document.activeElement?.id || ''); } catch {}
+  location.reload();
+}
+document.addEventListener('focusout', () => setTimeout(() => { if (reloadPending) reload(); }));
+if (SERVED) new EventSource('/events').onmessage = reload;
+
+function saveField(i, key, value, onError) {
+  if (!TASKS[i]) return;
+  api('/field', { path: TASKS[i]._path, key, value }).catch(e => onError(e.message));
+}
+
 function setStatus(i, status) {
-  if (!TASKS[i] || TASKS[i].status === status) return;
-  api('/status', { path: TASKS[i]._path, status })
-    .then(() => location.reload())
-    .catch(e => { document.getElementById('notice').textContent = e.message; });
+  if (TASKS[i]?.status === status) return;
+  saveField(i, 'status', status, message => { document.getElementById('notice').textContent = message; });
+}
+
+// The dialog's fields. A change writes one frontmatter key.
+const LIST_FIELDS = ['scope', 'type'];
+function fieldsHtml(task) {
+  const attrs = key => `id="fld-${esc(key)}" data-field="${esc(key)}"${SERVED ? '' : ' disabled title="Read-only over file://"'}`;
+  const row = (key, control) => `<label for="fld-${esc(key)}">${esc(key)}</label>${control}`;
+  const option = (value, label, current) => `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(label)}</option>`;
+  const select = (key, values) => {
+    const current = String(task[key] ?? '');
+    const all = ['', ...values, ...(current && !values.includes(current) ? [current] : [])];
+    return `<select ${attrs(key)}>${all.map(v => option(v, v, current)).join('')}</select>`;
+  };
+  // Free text, with the values other tasks use as suggestions.
+  const text = key => {
+    const known = [...new Set(TASKS.flatMap(t => [].concat(t[key] ?? []).map(String)))].sort();
+    return `<input ${attrs(key)} type="text" value="${esc(task[key] ?? '')}" list="dl-${esc(key)}" autocomplete="off">`
+      + `<datalist id="dl-${esc(key)}">${known.map(v => `<option value="${esc(v)}">`).join('')}</datalist>`;
+  };
+  return row('status', `<select ${attrs('status')}>${COLUMNS.map(c => option(c.id, c.label, task.status)).join('')}</select>`)
+    + Object.entries(FIELDS).map(([key, values]) => row(key, values.length ? select(key, values) : text(key))).join('')
+    + row('assign', text('assign'))
+    + row('due', `<input ${attrs('due')} type="date" value="${esc(task.due ?? '')}">`)
+    + LIST_FIELDS.map(key => row(key, `<input ${attrs(key)} type="text" value="${esc([].concat(task[key] ?? []).join(', '))}" placeholder="a, b" autocomplete="off">`)).join('');
 }
 
 function openTask(i, { push = false } = {}) {
@@ -201,17 +267,16 @@ function openTask(i, { push = false } = {}) {
   document.getElementById('dlg-back').hidden = !trail.length;
 
   document.getElementById('dlg-title').textContent = task.title || task.filename;
-  const status = `<select class="tag status" id="dlg-status" aria-label="Status">${COLUMNS.map(c =>
-    `<option value="${c.id}"${c.id === task.status ? ' selected' : ''}>${esc(c.label)}</option>`).join('')}</select>`;
-  document.getElementById('dlg-meta').innerHTML = status + tagsHtml(task);
-  document.getElementById('dlg-status').addEventListener('change', e => setStatus(i, e.target.value));
+  document.getElementById('dlg-fields').innerHTML = fieldsHtml(task);
   const back = TASKS.map((t, j) => Object.values(t.links).includes(i) ? j : -1).filter(j => j >= 0)
     .map(j => `<a class="wikilink" data-i="${j}" tabindex="0">${esc(TASKS[j].title || TASKS[j].filename)}</a>`).join('');
   document.getElementById('dlg-body').innerHTML = (task.body
     ? mdToHtml(task.body, task.links)
     : '<p class="empty">No description.</p>')
     + (back ? `<div class="links">← ${back}</div>` : '');
-  document.getElementById('dlg-path').textContent = task.filename;
+  if (!SERVED) document.querySelectorAll('#dlg-body [data-check]').forEach(el => { el.disabled = true; });
+  const edited = task._mtime ? `, edited ${new Date(task._mtime).toLocaleString('en-CA', { dateStyle: 'short', timeStyle: 'short', hour12: false })}` : '';
+  document.getElementById('dlg-path').textContent = `${task._dir}/${task.filename}${edited}`;
   document.getElementById('dlg-error').textContent = '';
 
   // http(s) only, so a frontmatter value cannot inject a javascript: link.
@@ -219,9 +284,36 @@ function openTask(i, { push = false } = {}) {
     ? `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${label} ↗</a>` : '';
   document.getElementById('dlg-links').innerHTML = link(task.issue_url, 'Issue');
 
+  // The open task lives in the URL, so a reload or a shared link reopens it.
+  const url = new URL(location.href);
+  url.searchParams.set('task', task.filename.replace(/\.md$/, ''));
+  history.replaceState(null, '', url);
+
   if (!dialog.open) dialog.showModal();
   document.getElementById('dlg-open').focus();
 }
+
+dialog.addEventListener('close', () => {
+  const url = new URL(location.href);
+  url.searchParams.delete('task');
+  history.replaceState(null, '', url);
+});
+
+dialog.addEventListener('change', e => {
+  const error = document.getElementById('dlg-error');
+  error.textContent = '';
+  const box = e.target.closest('[data-check]');
+  if (box) {
+    api('/check', { path: currentPath, index: Number(box.dataset.check), checked: box.checked })
+      .catch(err => { box.checked = !box.checked; error.textContent = err.message; });
+    return;
+  }
+  const el = e.target.closest('[data-field]');
+  if (!el) return;
+  const key = el.dataset.field;
+  saveField(TASKS.findIndex(t => t._path === currentPath), key, LIST_FIELDS.includes(key) ? el.value.split(',') : el.value,
+    message => { error.textContent = message; });
+});
 
 function followLink(a) {
   trail.push(TASKS.findIndex(t => t._path === currentPath));
@@ -248,7 +340,9 @@ board.addEventListener('click', e => {
 });
 dialog.addEventListener('click', e => {
   const a = e.target.closest('.wikilink');
-  if (a) followLink(a);
+  if (!a) return;
+  e.preventDefault(); // a wikilink inside a checkbox label follows the link without ticking the box
+  followLink(a);
 });
 dialog.addEventListener('keydown', e => {
   const a = e.target.closest('.wikilink');
@@ -306,7 +400,7 @@ board.addEventListener('submit', e => {
   const err = form.querySelector('.error');
   err.textContent = '';
   api('/new', { title: form.querySelector('input').value, status: form.closest('.column').dataset.col })
-    .then(() => location.reload())
+    .then(() => form.querySelector('input').blur())
     .catch(ex => { err.textContent = ex.message; });
 });
 board.addEventListener('keydown', e => {
@@ -398,6 +492,15 @@ document.getElementById('f-view').addEventListener('click', e => {
   if (on) renderGraph();
 });
 
+// Color mode for every board on this machine. The <head> script applies it before the first paint.
+document.querySelectorAll('input[name="theme"]').forEach(radio => {
+  radio.checked = radio.value === (document.documentElement.dataset.theme || '');
+  radio.addEventListener('change', () => {
+    document.documentElement.dataset.theme = radio.value;
+    try { localStorage.setItem('kandepo:theme', radio.value); } catch {}
+  });
+});
+
 CONTROLS.forEach(el => el.addEventListener('change', render));
 ['f-reset', 'empty-reset'].forEach(id => document.getElementById(id).addEventListener('click', resetFilters));
 
@@ -405,3 +508,10 @@ disableEmptyFilters();
 loadState();
 loadUrl();
 render();
+
+const openFromUrl = new URLSearchParams(location.search).get('task');
+if (openFromUrl) openTask(TASKS.findIndex(t => t.filename === openFromUrl + '.md'));
+try {
+  document.getElementById(sessionStorage.getItem('kandepo:focus') || '')?.focus();
+  sessionStorage.removeItem('kandepo:focus');
+} catch {}

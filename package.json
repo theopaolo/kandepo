@@ -9,15 +9,19 @@
     "test": "node test.cjs"
   },
   "description": "Kanban board generated from markdown task files committed in your repo.",
-  "repository": "github:theopaolo/kandepo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theopaolo/kandepo.git"
+  },
   "bin": {
-    "kandepo": "./kanban.cjs"
+    "kandepo": "kanban.cjs"
   },
   "files": [
     "kanban.cjs",
     "src/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "AGENTS.md"
   ],
   "license": "AGPL-3.0-only",
   "keywords": [
