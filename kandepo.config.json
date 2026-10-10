@@ -1,0 +1,7 @@
+{
+  "title": "kandepo",
+  "fields": {
+    "priority": ["high", "medium", "low"],
+    "size": ["S", "M", "L"]
+  }
+}

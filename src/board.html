@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{title}}</title>
+<style>
+{{styles}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="filters">{{filters}}
+
+    <span class="filter"><label for="f-sort">sort</label>
+    <select id="f-sort">{{sorts}}<option value="">file</option></select></span>
+
+    <button class="btn" id="f-view" aria-pressed="false">Graph</button>
+    <button class="btn" id="f-reset" hidden>Reset</button>
+  </div>
+  <span class="error" id="notice" role="alert"></span>
+  <div class="meta"><h1>{{title}}</h1><span id="count" aria-live="polite"></span></div>
+</header>
+
+<main>
+<svg id="graph" class="hidden" aria-label="Graph of the links between tasks"></svg>
+
+<p class="empty-board" id="empty" hidden>No task matches these filters. <button class="btn" id="empty-reset">Reset</button></p>
+
+<div class="board" id="board">
+  {{board}}
+</div>
+</main>
+
+<dialog id="task-dialog" aria-labelledby="dlg-title">
+  <div class="dialog-head">
+    <h2 id="dlg-title"></h2>
+    <div class="card-meta" id="dlg-meta"></div>
+  </div>
+  <div class="dialog-body" id="dlg-body"></div>
+  <div class="dialog-foot">
+    <span class="path" id="dlg-path"></span>
+    <button class="btn" id="dlg-back" hidden>← Back</button>
+    <span id="dlg-links"></span>
+    <span class="error" id="dlg-error" role="alert"></span>
+    <button class="btn" id="dlg-close">Close</button>
+    <button class="btn primary" id="dlg-open" autofocus>Open in editor</button>
+  </div>
+</dialog>
+
+<script>
+const TASKS = {{tasks}};
+
+const COLUMNS = {{columns}};
+
+const FIELDS = {{fields}};
+
+const SERVER_URL = {{serverUrl}};
+
+{{script}}
+</script>
+</body>
+</html>

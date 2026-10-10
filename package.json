@@ -1,0 +1,31 @@
+{
+  "name": "kandepo",
+  "version": "0.0.1",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "board": "node kanban.cjs",
+    "test": "node test.cjs"
+  },
+  "description": "Kanban board generated from markdown task files committed in your repo.",
+  "repository": "github:theopaolo/kandepo",
+  "bin": {
+    "kandepo": "./kanban.cjs"
+  },
+  "files": [
+    "kanban.cjs",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "kanban",
+    "markdown",
+    "tasks",
+    "todo",
+    "cli"
+  ],
+  "author": "theopaolo"
+}
