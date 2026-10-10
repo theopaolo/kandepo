@@ -124,7 +124,7 @@ list it too. To have no custom field, set `"fields": {}`.
 ### Command line
 
 ```bash
-npx kandepo [tasks-dir] [html-file] [--no-serve] [--watch] [--help]
+npx kandepo [tasks-dir] [html-file] [--no-serve] [--watch] [--sync[=name]] [--dry-run] [--help]
 ```
 
 Positional arguments win over the config: `npx kandepo todo board.html`
@@ -134,7 +134,43 @@ reads `./todo` and writes `./board.html`.
 | ------------ | ------------------------------------------------------------------- |
 | `--no-serve` | Generate and exit, for CI or a build. The file opens over `file://`, read-only |
 | `--watch`    | With `--no-serve`: rebuild on changes without the server            |
+| `--sync`     | Run every connector, `--sync=name` runs one, see below              |
+| `--dry-run`  | With `--sync`: passed to the connectors, no rebuild                 |
 | `--help`     | Print the usage and the task fields, custom fields included         |
+
+### Connectors
+
+A connector syncs the task files with another tool, such as Plane, Vikunja
+or GitHub issues. The package includes none. A connector is a module
+you list in the config with `use`, a path or a package name resolved from
+the project. The other keys are its options. Without a `package.json`,
+`npx -p kandepo -p <connector-package> kandepo --sync` finds a connector
+installed next to kandepo.
+
+```json
+{
+  "connectors": {
+    "tracker": { "use": "./connectors/tracker.cjs", "project": "web", "tokenEnv": "TRACKER_TOKEN" }
+  }
+}
+```
+
+The module exports one async function:
+
+```js
+exports.sync = async ({ options, tasks, dirs, dryRun, log, statuses, slugify, setField, parseFrontmatter }) => {
+  // options: { project: 'web', tokenEnv: 'TRACKER_TOKEN' }
+  // tasks:   the parsed tasks, with filename, _path and every frontmatter key
+  // dirs:    the task folders, write new files to dirs[0]
+  // dryRun:  true with --dry-run, write nothing
+};
+```
+
+The connector reads and writes the files itself. `setField(content, key,
+value)` sets one frontmatter key and keeps the rest of the file.
+`slugify(title)` gives the file name kandepo uses. `npx kandepo --sync`
+runs the connectors in config order, then rebuilds the board. Keep API
+tokens in environment variables and put only their names in the config.
 
 ## How it works
 

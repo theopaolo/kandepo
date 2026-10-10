@@ -2,10 +2,10 @@
 
 /**
  * kandepo: a kanban generated from the markdown tasks of a repo.
- * Usage: kandepo [tasks-dir] [output-file] [--no-serve] [--watch] [--help]
+ * Usage: kandepo [tasks-dir] [output-file] [--no-serve] [--watch] [--sync[=name]] [--dry-run] [--help]
  * While it runs, the server serves the board on http://localhost:<port>, watches the
  * task folders and rebuilds the HTML. POST /new creates a task, POST /status changes
- * its column, POST /open opens the file in the editor.
+ * its column, POST /open opens the file in the editor. --sync runs the connectors of the config.
  * Config: kandepo.config.json in the current folder, every key optional, see DEFAULTS.
  * CLI arguments win over the config file.
  */
@@ -185,10 +185,11 @@ function fieldTemplate(fields = CONFIG.fields) {
   ].join('\n');
 }
 
-const help = () => `Usage: kandepo [tasks-dir] [html-file] [--no-serve] [--watch]
+const help = () => `Usage: kandepo [tasks-dir] [html-file] [--no-serve] [--watch] [--sync[=name]] [--dry-run]
 
 Reads the .md files in ./tasks (or the dirs of kandepo.config.json), writes ./kanban.html
 and serves it on http://localhost:${CONFIG.port} while the command runs.
+--sync runs every connector of kandepo.config.json, --sync=name one of them.
 
 One task = one .md file, only title is required:
 
@@ -357,9 +358,35 @@ function serve() {
   });
 }
 
+// A connector is a module listed in the config, resolved from the project, then from kandepo's
+// own folder for `npx -p kandepo -p <connector>`. It exports sync(context) and writes task files
+// itself, kandepo rebuilds the board after.
+async function sync(argv, config = CONFIG, cwd = process.cwd()) {
+  const only = (argv.find(a => a.startsWith('--sync=')) || '').slice('--sync='.length);
+  const connectors = Object.entries(config.connectors || {}).filter(([name]) => !only || name === only);
+  if (!connectors.length) throw new Error(only ? `No connector "${only}" in kandepo.config.json` : 'No connectors in kandepo.config.json');
+  const dryRun = argv.includes('--dry-run');
+  for (const [name, { use, ...options }] of connectors) {
+    if (!use) throw new Error(`kandepo.config.json: connectors.${name} needs "use", a path or a package name`);
+    const connector = require(require.resolve(use, { paths: [cwd, __dirname] }));
+    await connector.sync({
+      options, dryRun, dirs: config.dirs, statuses: STATUSES,
+      tasks: readTasks(config.dirs),
+      log: message => console.log(`[${name}] ${message}`),
+      slugify, setField, parseFrontmatter,
+    });
+  }
+  return dryRun;
+}
+
 if (require.main === module) {
   if (process.argv.includes('--help') || process.argv.includes('-h')) {
     console.log(help());
+  } else if (process.argv.some(a => a === '--sync' || a.startsWith('--sync='))) {
+    sync(process.argv).then(dryRun => { if (!dryRun) build(); }).catch(err => {
+      console.error(`Sync failed: ${err.message}`);
+      process.exitCode = 1;
+    });
   } else {
     build();
     if (CONFIG.serve) serve();
@@ -367,4 +394,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { loadConfig, parseFrontmatter, readTasks, resolveLinks, collectFilters, isAllowedPath, setField, slugify, fieldTemplate, DEFAULTS };
+module.exports = { loadConfig, parseFrontmatter, readTasks, resolveLinks, collectFilters, isAllowedPath, setField, slugify, fieldTemplate, sync, DEFAULTS };

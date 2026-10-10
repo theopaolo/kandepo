@@ -8,7 +8,7 @@ const { execFileSync, spawn } = require('child_process');
 const { once } = require('events');
 const { setTimeout: delay } = require('timers/promises');
 const vm = require('vm');
-const { loadConfig, parseFrontmatter, readTasks, resolveLinks, collectFilters, isAllowedPath, setField, slugify, fieldTemplate, DEFAULTS } = require('./kanban.cjs');
+const { loadConfig, parseFrontmatter, readTasks, resolveLinks, collectFilters, isAllowedPath, setField, slugify, fieldTemplate, sync, DEFAULTS } = require('./kanban.cjs');
 
 // frontmatter : scalaire, ~, liste inline, liste en bloc
 const { data, body } = parseFrontmatter(
@@ -145,6 +145,31 @@ assert.deepStrictEqual([{ size: 'L' }, {}, { size: 'S' }, { size: 'XL' }].sort((
 
 assert.strictEqual(slugify('Réécrire l’app : test'), 'reecrire-lapp-test');
 
+// Connectors: resolved from the project, get the options without "use", run all or one by name.
+async function checkSync() {
+  const syncDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kandepo-sync-'));
+  fs.mkdirSync(path.join(syncDir, 'tasks'));
+  fs.writeFileSync(path.join(syncDir, 'tasks', 'a.md'), '---\ntitle: A\n---\n');
+  fs.writeFileSync(path.join(syncDir, 'fake.cjs'), `exports.sync = async ctx => {
+    require('fs').appendFileSync(${JSON.stringify(path.join(syncDir, 'calls.json'))}, JSON.stringify({ options: ctx.options, dryRun: ctx.dryRun, tasks: ctx.tasks.length }) + '\\n');
+  };`);
+  const config = { dirs: [path.join(syncDir, 'tasks')], connectors: { one: { use: './fake.cjs', token: 'x' }, two: { use: './fake.cjs' } } };
+  try {
+    assert.strictEqual(await sync(['--sync', '--dry-run'], config, syncDir), true);
+    assert.strictEqual(await sync(['--sync=two'], config, syncDir), false);
+    const calls = fs.readFileSync(path.join(syncDir, 'calls.json'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepStrictEqual(calls, [
+      { options: { token: 'x' }, dryRun: true, tasks: 1 },
+      { options: {}, dryRun: true, tasks: 1 },
+      { options: {}, dryRun: false, tasks: 1 },
+    ]);
+    await assert.rejects(sync(['--sync=nope'], config, syncDir), /No connector "nope"/);
+    await assert.rejects(sync(['--sync'], { dirs: [] }, syncDir), /No connectors/);
+  } finally {
+    fs.rmSync(syncDir, { recursive: true, force: true });
+  }
+}
+
 async function checkWatch() {
   const child = spawn(process.execPath, [path.join(__dirname, 'kanban.cjs'), '--no-serve', '--watch'], { cwd: dir });
   const closed = once(child, 'close');
@@ -233,6 +258,6 @@ async function checkServer() {
   }
 }
 
-Promise.all([checkWatch(), checkServer()])
+Promise.all([checkSync(), checkWatch(), checkServer()])
   .then(() => console.log('ok'))
   .catch(err => { console.error(err); process.exitCode = 1; });
